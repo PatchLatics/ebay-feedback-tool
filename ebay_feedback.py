@@ -51,20 +51,53 @@ def _random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
     time.sleep(random.uniform(min_s, max_s))
 
 
+_EBAY_DOMAINS = ("ebay.co.uk", "ebay.com")
+
+# sameSite values Playwright's add_cookies() accepts
+_VALID_SAME_SITE = {"Strict", "Lax", "None"}
+
+
 def _load_cookies() -> list[dict]:
-    """Read cookies.json, raising a clear error if it's missing."""
+    """
+    Read cookies.json, filter to eBay domains, and sanitise fields so
+    Playwright's add_cookies() accepts every entry without errors.
+    """
     if not COOKIES_FILE.exists():
         raise FileNotFoundError(
             f"{COOKIES_FILE.name} not found.\n"
             "  Run  python export_cookies.py  first to capture your eBay session."
         )
-    data = json.loads(COOKIES_FILE.read_text())
-    if not data:
+    raw: list[dict] = json.loads(COOKIES_FILE.read_text())
+    if not raw:
         raise ValueError(
             f"{COOKIES_FILE.name} is empty.\n"
             "  Run  python export_cookies.py  again to recapture your session."
         )
-    return data
+
+    cookies = []
+    for c in raw:
+        domain = c.get("domain", "")
+        # Keep only cookies that belong to an eBay domain
+        if not any(domain.lstrip(".").endswith(d) for d in _EBAY_DOMAINS):
+            continue
+
+        # Playwright requires sameSite to be "Strict", "Lax", or "None"
+        if c.get("sameSite") not in _VALID_SAME_SITE:
+            c = {**c, "sameSite": "Lax"}
+
+        # expires == -1 means session cookie; Playwright wants it omitted
+        if c.get("expires", 0) == -1:
+            c = {k: v for k, v in c.items() if k != "expires"}
+
+        cookies.append(c)
+
+    if not cookies:
+        raise ValueError(
+            "No eBay cookies found in cookies.json.\n"
+            "  Run  python export_cookies.py  again while logged in to eBay."
+        )
+
+    return cookies
 
 
 def _is_logged_in(page: Page) -> bool:
