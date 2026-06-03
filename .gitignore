@@ -1,4 +1,5 @@
 .env
+cookies.json
 .browser_session/
 __pycache__/
 *.pyc

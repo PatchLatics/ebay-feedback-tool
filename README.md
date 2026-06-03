@@ -15,14 +15,15 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Configure credentials
+### 2. Capture your session (one-time setup)
 
 ```bash
-cp .env.example .env
-# Edit .env and fill in your eBay username and password
+python export_cookies.py
 ```
 
-Or skip this — the tool will prompt you for credentials at runtime if `.env` is not present.
+This opens a **Brave browser** window, navigates to eBay, and waits for you to log in manually — bypassing hCaptcha entirely. Once you confirm you're logged in, it saves your session cookies to `cookies.json`. You only need to do this once (or whenever eBay signs you out).
+
+> **Requires Brave browser.** Download from https://brave.com/download/ if you don't have it.
 
 ### 3. Run it
 
@@ -30,11 +31,7 @@ Or skip this — the tool will prompt you for credentials at runtime if `.env` i
 python main.py
 ```
 
-That's it. The tool will:
-1. Log in to eBay (reusing your saved session on future runs — no re-login needed)
-2. Find every pending feedback item
-3. Pick a varied, natural-sounding positive message for each one
-4. Submit them all automatically
+That's it. The tool loads your saved cookies, verifies the session is active, finds every pending feedback item, and submits a varied positive message for each one — fully automatically.
 
 ---
 
@@ -43,13 +40,10 @@ That's it. The tool will:
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Show what would be posted without submitting anything |
-| `--headed` | Show the browser window while it runs (useful for debugging) |
+| `--headed` | Show the Chromium window while it runs (useful for debugging) |
 
 ```bash
-# Preview without submitting
 python main.py --dry-run
-
-# Watch the browser in action
 python main.py --headed
 ```
 
@@ -57,16 +51,28 @@ python main.py --headed
 
 ## How it works
 
-- Uses **Playwright** (headless Chromium) to drive eBay like a real browser.
-- Saves your browser session in `.browser_session/` so you only need to log in once.
-- If eBay triggers a 2FA / security challenge, the tool pauses and lets you complete it in the browser window, then continues automatically.
+- **`export_cookies.py`** — opens Brave (a real browser, not Playwright's bundled Chromium) so eBay's hCaptcha never triggers. After you log in normally, it dumps all eBay session cookies to `cookies.json`.
+- **`main.py` / `ebay_feedback.py`** — launches headless Chromium, injects the saved cookies before loading any page, then processes all pending feedback items.
 - Messages are randomly selected from themed pools (Pokémon cards, football stickers, generic) based on the item title, so they look natural and varied.
-- Adds human-like random delays between actions to avoid bot detection.
+- Adds human-like random delays between actions.
+- If eBay ever expires the session, the tool detects it immediately and tells you to re-run `export_cookies.py`.
+
+---
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `export_cookies.py` | One-time setup: log in via Brave, save cookies |
+| `main.py` | CLI entry point |
+| `ebay_feedback.py` | Core automation logic |
+| `feedback_messages.py` | Varied positive message pools |
+| `cookies.json` | Your saved session *(gitignored — keep private)* |
 
 ---
 
 ## Notes
 
-- Your credentials are stored only in your local `.env` file — never sent anywhere except eBay's login page.
-- The `.browser_session/` directory stores cookies/localStorage. Keep it private (it's gitignored).
-- If eBay changes their page layout significantly, the selectors in `ebay_feedback.py` may need updating.
+- `cookies.json` grants full access to your eBay account — keep it private and never commit it.
+- Re-run `export_cookies.py` if the tool reports that cookies are expired.
+- Set `HEADLESS=false` in a `.env` file (or use `--headed`) to watch the browser work.
