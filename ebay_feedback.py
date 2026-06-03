@@ -1,15 +1,20 @@
 """
 Core eBay feedback automation using Playwright.
 
+Runs entirely inside the user's real Brave browser (persistent profile),
+so eBay sees an already-authenticated, trusted session with no bot signals.
+
 Flow:
-  1. Launch a headless Chromium context and inject saved cookies from cookies.json.
-  2. Verify the session is active (if not, tell the user to run export_cookies.py).
+  1. Launch Brave with the real User Data directory via launch_persistent_context.
+  2. Verify the session looks active; warn if not but continue anyway.
   3. Navigate to the "Leave Feedback" page and collect all pending items.
   4. For each item, submit a positive feedback message.
   5. Report results.
+
+IMPORTANT: Brave must be fully closed before running this script.
+           Chromium locks the profile directory while it is open.
 """
 
-import json
 import time
 import random
 from pathlib import Path
@@ -20,10 +25,24 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
 from feedback_messages import get_feedback
 
-COOKIES_FILE = Path(__file__).parent / "cookies.json"
+# ---------------------------------------------------------------------------
+# Brave paths — adjust if your installation differs
+# ---------------------------------------------------------------------------
+
+BRAVE_EXE = Path(
+    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+)
+BRAVE_PROFILE = Path(
+    r"C:\Users\PatchLatics\AppData\Local\BraveSoftware\Brave-Browser\User Data"
+)
+
 EBAY_HOME = "https://www.ebay.co.uk"
 FEEDBACK_URL = "https://www.ebay.co.uk/fdbk/leave_feedback"
 
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 @dataclass
 class FeedbackResult:
@@ -51,57 +70,31 @@ def _random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
     time.sleep(random.uniform(min_s, max_s))
 
 
-_EBAY_DOMAINS = ("ebay.co.uk", "ebay.com")
-
-# sameSite values Playwright's add_cookies() accepts
-_VALID_SAME_SITE = {"Strict", "Lax", "None"}
-
-
-def _load_cookies() -> list[dict]:
-    """
-    Read cookies.json, filter to eBay domains, and sanitise fields so
-    Playwright's add_cookies() accepts every entry without errors.
-    """
-    if not COOKIES_FILE.exists():
+def _check_brave_paths() -> None:
+    """Abort early with a helpful message if the Brave paths don't exist."""
+    if not BRAVE_EXE.exists():
         raise FileNotFoundError(
-            f"{COOKIES_FILE.name} not found.\n"
-            "  Run  python export_cookies.py  first to capture your eBay session."
+            f"Brave executable not found at:\n  {BRAVE_EXE}\n"
+            "Edit BRAVE_EXE at the top of ebay_feedback.py to match your installation."
         )
-    raw: list[dict] = json.loads(COOKIES_FILE.read_text())
-    if not raw:
-        raise ValueError(
-            f"{COOKIES_FILE.name} is empty.\n"
-            "  Run  python export_cookies.py  again to recapture your session."
-        )
-
-    cookies = []
-    for c in raw:
-        domain = c.get("domain", "")
-        # Keep only cookies that belong to an eBay domain
-        if not any(domain.lstrip(".").endswith(d) for d in _EBAY_DOMAINS):
-            continue
-
-        # Playwright requires sameSite to be "Strict", "Lax", or "None"
-        if c.get("sameSite") not in _VALID_SAME_SITE:
-            c = {**c, "sameSite": "Lax"}
-
-        # expires == -1 means session cookie; Playwright wants it omitted
-        if c.get("expires", 0) == -1:
-            c = {k: v for k, v in c.items() if k != "expires"}
-
-        cookies.append(c)
-
-    if not cookies:
-        raise ValueError(
-            "No eBay cookies found in cookies.json.\n"
-            "  Run  python export_cookies.py  again while logged in to eBay."
+    if not BRAVE_PROFILE.exists():
+        raise FileNotFoundError(
+            f"Brave profile directory not found at:\n  {BRAVE_PROFILE}\n"
+            "Edit BRAVE_PROFILE at the top of ebay_feedback.py to match your profile path."
         )
 
-    return cookies
+
+def _profile_is_locked() -> bool:
+    """Return True if another Brave/Chromium process holds the profile lock."""
+    for name in ("SingletonLock", "SingletonSocket", "lockfile"):
+        candidate = BRAVE_PROFILE / name
+        if candidate.exists() or candidate.is_symlink():
+            return True
+    return False
 
 
 def _is_logged_in(page: Page) -> bool:
-    """Check for any signed-in indicator eBay renders in the header."""
+    """Best-effort check for a logged-in eBay session."""
     try:
         page.goto(EBAY_HOME, wait_until="domcontentloaded", timeout=20_000)
         for sel in ("#gh-ug", "[data-testid='gh-ug']", ".gh-username", "#gh-eb-My"):
@@ -139,7 +132,6 @@ def _get_pending_items(page: Page) -> list[dict]:
     rows = page.locator("tr.fb-row, .feedback-row, [data-itemid]").all()
 
     if not rows:
-        # Fallback: find any leave-feedback links on the page
         links = page.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").all()
         for link in links:
             href = link.get_attribute("href") or ""
@@ -163,14 +155,12 @@ def _get_pending_items(page: Page) -> list[dict]:
 
 def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
     """Open the feedback form for a single item and submit positive feedback."""
-    item_id = item["item_id"]
-    title = item["title"]
-    feedback_url = item["feedback_url"]
-
-    result = FeedbackResult(item_id=item_id, title=title, success=False)
+    result = FeedbackResult(item_id=item["item_id"], title=item["title"], success=False)
 
     try:
-        url = feedback_url if feedback_url.startswith("http") else f"{EBAY_HOME}{feedback_url}"
+        url = item["feedback_url"]
+        if not url.startswith("http"):
+            url = f"{EBAY_HOME}{url}"
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         _random_delay(1.5, 2.5)
 
@@ -205,7 +195,7 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
         _random_delay(0.5, 1.5)
 
         # --- Type feedback comment ---
-        message = get_feedback(title)
+        message = get_feedback(item["title"])
         typed = False
         for sel in (
             "textarea[name*='comment']",
@@ -251,7 +241,6 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
             result.error = "Could not find submit button"
             return result
 
-        # Wait for confirmation (not all eBay pages show one — that's fine)
         try:
             page.wait_for_selector(
                 "text=Thank you, text=feedback has been, text=successfully",
@@ -274,43 +263,49 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
 # Public API
 # ---------------------------------------------------------------------------
 
-def run(headless: bool = True, dry_run: bool = False) -> RunSummary:
+def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
     """
-    Load saved cookies, verify the session, then submit feedback for every
-    pending item. Raises FileNotFoundError if cookies.json is missing.
+    Launch Brave with the real user profile and submit feedback for every
+    pending eBay item.
+
+    headless=False by default because running a persistent Brave profile
+    headlessly can trigger bot-detection on some eBay flows.
     """
-    cookies = _load_cookies()
+    _check_brave_paths()
+
+    if _profile_is_locked():
+        raise RuntimeError(
+            "Brave is currently running — its profile directory is locked.\n"
+            "Please close Brave completely, then run the script again.\n"
+            "\n"
+            "  Windows: right-click the Brave icon in the system tray → Exit\n"
+            "  Or open Task Manager, find 'Brave', and end the process."
+        )
+
     summary = RunSummary()
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=str(BRAVE_PROFILE),
+            executable_path=str(BRAVE_EXE),
             headless=headless,
-            args=["--no-sandbox"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
+            args=["--start-maximized"],
+            viewport=None,
             locale="en-GB",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
         )
 
-        # Inject saved cookies before loading any page
-        context.add_cookies(cookies)
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
 
-        # --- Verify session ---
+        # Navigate to eBay home so we can check login state
         if not _is_logged_in(page):
             print(
-                "[!] Cookies are expired or invalid — eBay is not recognising the session.\n"
-                "    Run  python export_cookies.py  to capture a fresh session, then try again."
+                "[!] eBay does not appear to be logged in inside Brave.\n"
+                "    Open Brave normally, sign in to eBay, close Brave, then run again."
             )
-            browser.close()
+            context.close()
             return summary
 
-        print("Session active — cookies loaded successfully.")
+        print("Session active — running inside your Brave profile.")
 
         # --- Collect pending items ---
         print("Fetching pending feedback items...")
@@ -319,7 +314,7 @@ def run(headless: bool = True, dry_run: bool = False) -> RunSummary:
 
         if not items:
             print("No pending feedback items found.")
-            browser.close()
+            context.close()
             return summary
 
         print(f"Found {len(items)} item(s) awaiting feedback.\n")
@@ -348,6 +343,6 @@ def run(headless: bool = True, dry_run: bool = False) -> RunSummary:
             if i < len(items):
                 _random_delay(2.0, 5.0)
 
-        browser.close()
+        context.close()
 
     return summary

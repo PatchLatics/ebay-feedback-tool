@@ -2,13 +2,13 @@
 """
 eBay Feedback Tool — CLI entry point.
 
-Usage:
-    python main.py               # Run normally (requires cookies.json)
-    python main.py --dry-run     # Preview what would be posted without submitting
-    python main.py --headed      # Show the browser window while running
+Runs inside your real Brave browser profile so eBay sees a trusted session.
+Close Brave before running.
 
-First-time setup:
-    python export_cookies.py     # Log in once via Brave to create cookies.json
+Usage:
+    python main.py            # Submit feedback for all pending items
+    python main.py --dry-run  # Preview messages without submitting
+    python main.py --headed   # Keep the Brave window visible while running
 """
 
 import argparse
@@ -93,8 +93,8 @@ def main() -> None:
 
     try:
         summary = run(headless=headless, dry_run=args.dry_run)
-    except FileNotFoundError as exc:
-        console.print(f"[bold red]Setup required:[/bold red] {exc}")
+    except (FileNotFoundError, RuntimeError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")

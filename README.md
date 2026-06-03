@@ -1,51 +1,49 @@
 # eBay Feedback Tool
 
-Automatically leaves positive feedback on all pending eBay orders — no manual steps after first-time setup.
+Automatically leaves positive feedback on all pending eBay orders — no manual steps, no cookie exports, no bot detection.
 
-Designed for buyers who purchase lots of individual Pokémon cards / football stickers and spend hours leaving feedback manually.
+Runs entirely inside your real Brave browser profile, so eBay sees the same trusted session it always sees when you browse normally.
 
 ---
 
-## Quick start
+## Requirements
 
-### 1. Install dependencies
+- Python 3.11+
+- [Brave browser](https://brave.com/download/) installed (uses your existing profile)
+- Playwright
+
+---
+
+## Setup
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Capture your session (one-time setup)
+That's it. No credentials to configure, no cookies to export.
 
-**Close Brave completely first**, then run:
+---
 
-```bash
-python export_cookies.py
-```
+## Usage
 
-This launches Brave using **your existing profile** — the same cookies, extensions, saved passwords and browser fingerprint you use every day. eBay sees a browser it already recognises, so hCaptcha never triggers. If you're already logged in to eBay it will detect that instantly; if not, just log in normally in the window that opens, then press ENTER in the terminal. Your session cookies are saved to `cookies.json`.
-
-You only need to do this once (or whenever eBay signs you out).
-
-> **Requires Brave browser.** Download from https://brave.com/download/ if you don't have it.  
-> Brave must be fully closed before running — Chromium locks the profile directory while it's open.
-
-### 3. Run it
+**Close Brave first**, then run:
 
 ```bash
 python main.py
 ```
 
-That's it. The tool loads your saved cookies, verifies the session is active, finds every pending feedback item, and submits a varied positive message for each one — fully automatically.
+The tool will:
+1. Launch Brave using your real profile (same session eBay already trusts)
+2. Find every order awaiting feedback
+3. Submit a varied, natural-sounding positive message for each one automatically
 
----
-
-## Options
+### Options
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Show what would be posted without submitting anything |
-| `--headed` | Show the Chromium window while it runs (useful for debugging) |
+| `--headed` | Keep the Brave window visible while running |
 
 ```bash
 python main.py --dry-run
@@ -56,28 +54,26 @@ python main.py --headed
 
 ## How it works
 
-- **`export_cookies.py`** — opens Brave (a real browser, not Playwright's bundled Chromium) so eBay's hCaptcha never triggers. After you log in normally, it dumps all eBay session cookies to `cookies.json`.
-- **`main.py` / `ebay_feedback.py`** — launches headless Chromium, injects the saved cookies before loading any page, then processes all pending feedback items.
-- Messages are randomly selected from themed pools (Pokémon cards, football stickers, generic) based on the item title, so they look natural and varied.
-- Adds human-like random delays between actions.
-- If eBay ever expires the session, the tool detects it immediately and tells you to re-run `export_cookies.py`.
+Playwright's `launch_persistent_context` opens Brave pointed at your real `User Data` directory — the same cookies, extensions, saved passwords and browser fingerprint you use every day. eBay cannot distinguish this from you opening Brave manually and going to the feedback page yourself.
+
+Feedback messages are randomly selected from themed pools (Pokémon cards, football stickers, generic) based on the item title, keeping them varied and natural.
 
 ---
 
-## Files
+## Brave paths
 
-| File | Purpose |
-|------|---------|
-| `export_cookies.py` | One-time setup: log in via Brave, save cookies |
-| `main.py` | CLI entry point |
-| `ebay_feedback.py` | Core automation logic |
-| `feedback_messages.py` | Varied positive message pools |
-| `cookies.json` | Your saved session *(gitignored — keep private)* |
+The tool is pre-configured for the default Windows Brave installation:
+
+| Setting | Path |
+|---------|------|
+| Brave executable | `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe` |
+| Brave profile | `C:\Users\PatchLatics\AppData\Local\BraveSoftware\Brave-Browser\User Data` |
+
+If your paths differ, edit `BRAVE_EXE` and `BRAVE_PROFILE` at the top of `ebay_feedback.py`.
 
 ---
 
 ## Notes
 
-- `cookies.json` grants full access to your eBay account — keep it private and never commit it.
-- Re-run `export_cookies.py` if the tool reports that cookies are expired.
-- Set `HEADLESS=false` in a `.env` file (or use `--headed`) to watch the browser work.
+- **Brave must be fully closed** before running — Chromium locks the profile directory while it's open. The tool detects this and shows a clear error if Brave is still running.
+- If eBay prompts you to log in inside the Brave window, just log in normally, let the script finish, and it will work on all future runs.
