@@ -93,20 +93,6 @@ def _profile_is_locked() -> bool:
     return False
 
 
-def _is_logged_in(page: Page) -> bool:
-    """Best-effort check for a logged-in eBay session."""
-    try:
-        page.goto(EBAY_HOME, wait_until="domcontentloaded", timeout=20_000)
-        for sel in ("#gh-ug", "[data-testid='gh-ug']", ".gh-username", "#gh-eb-My"):
-            try:
-                if page.locator(sel).is_visible(timeout=3_000):
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return False
-
 
 def _extract_param(url: str, param: str) -> Optional[str]:
     from urllib.parse import urlparse, parse_qs
@@ -296,16 +282,7 @@ def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
 
         page = context.pages[0] if context.pages else context.new_page()
 
-        # Navigate to eBay home so we can check login state
-        if not _is_logged_in(page):
-            print(
-                "[!] eBay does not appear to be logged in inside Brave.\n"
-                "    Open Brave normally, sign in to eBay, close Brave, then run again."
-            )
-            context.close()
-            return summary
-
-        print("Session active — running inside your Brave profile.")
+        print("Running inside your Brave profile.")
 
         # --- Collect pending items ---
         print("Fetching pending feedback items...")
