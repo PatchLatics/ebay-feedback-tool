@@ -102,59 +102,116 @@ def _save_debug_snapshot(page: Page) -> None:
     print(f"[debug] HTML      → {html_path}\n")
 
 
+def _click_purchases_tab(page: Page) -> None:
+    """Click the Purchases tab using its exact visible text."""
+    # get_by_role finds the tab regardless of the surrounding HTML structure
+    for locator in (
+        page.get_by_role("tab", name="Purchases"),
+        page.get_by_role("link", name="Purchases"),
+        page.get_by_text("Purchases", exact=True),
+    ):
+        try:
+            if locator.first.is_visible(timeout=3_000):
+                locator.first.click()
+                # Wait for the page to reflect the tab switch
+                _random_delay(2.0, 3.0)
+                return
+        except Exception:
+            continue
+    print("[!] 'Purchases' tab not found — scraping current tab as-is.")
+
+
 def _get_pending_buyer_items(page: Page, debug: bool = False) -> list[dict]:
     """
-    Navigate to the leave-feedback page and return only items where the
-    user is the BUYER (purchases), skipping any seller-side entries.
-    Each item dict contains: item_id, title, feedback_url.
+    Navigate to the leave-feedback page, switch to the Purchases tab, then
+    find every item that has a 'Positive' button visible (i.e. awaiting feedback).
+    Returns a list of dicts with: item_id, title, feedback_url.
     """
-    # eBay's feedback page has a "Purchases" tab — click it to filter to buyer items
     page.goto(FEEDBACK_URL, wait_until="domcontentloaded", timeout=30_000)
     _random_delay(1.5, 2.5)
 
-    # Click the "As a Buyer" / "Purchases" tab if present
-    for tab_sel in (
-        "a:has-text('As a Buyer')",
-        "a:has-text('Purchases')",
-        "li:has-text('As a Buyer') a",
-        "li:has-text('Purchases') a",
-        "[data-tab*='buyer' i]",
-        "[data-tab*='purchase' i]",
-    ):
-        try:
-            tab = page.locator(tab_sel).first
-            if tab.is_visible(timeout=2_000):
-                tab.click()
-                _random_delay(1.0, 2.0)
-                break
-        except Exception:
-            continue
+    _click_purchases_tab(page)
 
     if debug:
         _save_debug_snapshot(page)
 
     items = []
 
-    # Primary: rows with data-itemid attribute
-    rows = page.locator("tr.fb-row, .feedback-row, [data-itemid]").all()
-    if rows:
-        for row in rows:
-            item_id = row.get_attribute("data-itemid") or ""
-            title_el = row.locator(".item-title, .item-name, td:nth-child(2)").first
-            title = title_el.inner_text().strip() if title_el else "Unknown item"
-            link_el = row.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").first
-            href = link_el.get_attribute("href") if link_el else ""
-            if href:
-                items.append({"item_id": item_id, "title": title, "feedback_url": href})
-        return items
+    # eBay's current feedback page renders each transaction as a card/row that
+    # contains a "Positive" button (or radio label).  Walk up from every
+    # "Positive" button to the nearest ancestor that also contains the item
+    # title and the leave-feedback link.
+    positive_buttons = page.locator(
+        "input[value='Positive'], "
+        "label:has-text('Positive'), "
+        "button:has-text('Positive'), "
+        "a:has-text('Positive')"
+    ).all()
 
-    # Fallback: any leave-feedback links on the page
-    for link in page.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").all():
-        href = link.get_attribute("href") or ""
-        if "item_id=" in href or "itemid=" in href.lower():
-            item_id = _extract_param(href, "item_id") or _extract_param(href, "itemId") or ""
-            title = link.inner_text().strip() or "Unknown item"
-            items.append({"item_id": item_id, "title": title, "feedback_url": href})
+    for btn in positive_buttons:
+        # Walk up the DOM to find a container that holds both the title and a link
+        container = None
+        for ancestor_sel in ("section", "article", "li", "tr", "div.card", "div"):
+            try:
+                candidate = btn.locator(f"xpath=ancestor::{ancestor_sel.split('.')[0]}[1]")
+                # Verify it contains something that looks like an item link or title
+                if candidate.locator("a").count() > 0:
+                    container = candidate
+                    break
+            except Exception:
+                continue
+
+        if container is None:
+            continue
+
+        # Title: prefer a heading or named element; fall back to first non-empty text
+        title = ""
+        for title_sel in ("h2", "h3", "h4", ".item-title", ".title", "span.BOLD", "a[href*='/itm/']"):
+            try:
+                el = container.locator(title_sel).first
+                if el.count() and el.is_visible(timeout=1_000):
+                    title = el.inner_text().strip()
+                    if title:
+                        break
+            except Exception:
+                continue
+
+        # Leave-feedback link: look for a form action or a direct href
+        href = ""
+        for link_sel in (
+            "a[href*='leave_feedback']",
+            "a[href*='leavefeedback']",
+            "a[href*='/fdbk/']",
+        ):
+            try:
+                el = container.locator(link_sel).first
+                if el.count():
+                    href = el.get_attribute("href") or ""
+                    if href:
+                        break
+            except Exception:
+                continue
+
+        # If there's no direct link, the Positive button itself may be inside a
+        # form whose action is the feedback URL
+        if not href:
+            try:
+                form = btn.locator("xpath=ancestor::form[1]")
+                href = form.get_attribute("action") or ""
+            except Exception:
+                pass
+
+        if not href:
+            continue
+
+        item_id = (
+            _extract_param(href, "item_id")
+            or _extract_param(href, "itemId")
+            or _extract_param(href, "iid")
+            or ""
+        )
+
+        items.append({"item_id": item_id, "title": title or "Unknown item", "feedback_url": href})
 
     return items
 
