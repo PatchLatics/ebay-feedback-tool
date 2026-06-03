@@ -17,13 +17,18 @@ playwright install chromium
 
 ### 2. Capture your session (one-time setup)
 
+**Close Brave completely first**, then run:
+
 ```bash
 python export_cookies.py
 ```
 
-This opens a **Brave browser** window, navigates to eBay, and waits for you to log in manually — bypassing hCaptcha entirely. Once you confirm you're logged in, it saves your session cookies to `cookies.json`. You only need to do this once (or whenever eBay signs you out).
+This launches Brave using **your existing profile** — the same cookies, extensions, saved passwords and browser fingerprint you use every day. eBay sees a browser it already recognises, so hCaptcha never triggers. If you're already logged in to eBay it will detect that instantly; if not, just log in normally in the window that opens, then press ENTER in the terminal. Your session cookies are saved to `cookies.json`.
 
-> **Requires Brave browser.** Download from https://brave.com/download/ if you don't have it.
+You only need to do this once (or whenever eBay signs you out).
+
+> **Requires Brave browser.** Download from https://brave.com/download/ if you don't have it.  
+> Brave must be fully closed before running — Chromium locks the profile directory while it's open.
 
 ### 3. Run it
 
