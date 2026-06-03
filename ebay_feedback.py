@@ -102,35 +102,38 @@ def _save_debug_snapshot(page: Page) -> None:
     print(f"[debug] HTML      → {html_path}\n")
 
 
-def _click_purchases_tab(page: Page) -> None:
-    """Click the Purchases tab using its exact visible text."""
-    # get_by_role finds the tab regardless of the surrounding HTML structure
-    for locator in (
-        page.get_by_role("tab", name="Purchases"),
-        page.get_by_role("link", name="Purchases"),
-        page.get_by_text("Purchases", exact=True),
-    ):
+def _load_all_items(page: Page) -> None:
+    """Keep clicking 'Load more' until it disappears or stops adding items."""
+    while True:
         try:
-            if locator.first.is_visible(timeout=3_000):
-                locator.first.click()
-                # Wait for the page to reflect the tab switch
-                _random_delay(2.0, 3.0)
-                return
+            btn = page.get_by_role("button", name="Load more").first
+            if not btn.is_visible(timeout=3_000):
+                break
+            prev_count = page.locator("input[value='Positive'], label:has-text('Positive')").count()
+            btn.click()
+            # Wait until new items appear or a timeout tells us there are no more
+            try:
+                page.wait_for_function(
+                    f"document.querySelectorAll(\"input[value='Positive'], label\").length > {prev_count}",
+                    timeout=8_000,
+                )
+            except PWTimeout:
+                break  # No new items appeared — we're at the end
+            _random_delay(1.0, 2.0)
         except Exception:
-            continue
-    print("[!] 'Purchases' tab not found — scraping current tab as-is.")
+            break
 
 
 def _get_pending_buyer_items(page: Page, debug: bool = False) -> list[dict]:
     """
-    Navigate to the leave-feedback page, switch to the Purchases tab, then
-    find every item that has a 'Positive' button visible (i.e. awaiting feedback).
+    Navigate to the leave-feedback page, expand all items via 'Load more',
+    then find every item that has a 'Positive' button (i.e. awaiting feedback).
     Returns a list of dicts with: item_id, title, feedback_url.
     """
     page.goto(FEEDBACK_URL, wait_until="domcontentloaded", timeout=30_000)
     _random_delay(1.5, 2.5)
 
-    _click_purchases_tab(page)
+    _load_all_items(page)
 
     if debug:
         _save_debug_snapshot(page)
