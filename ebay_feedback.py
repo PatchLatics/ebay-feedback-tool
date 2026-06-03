@@ -55,47 +55,140 @@ def _random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
 
 
 def _is_logged_in(page: Page) -> bool:
-    """Quick check: look for the signed-in username element."""
+    """Quick check: look for any signed-in indicator eBay renders in the header."""
     try:
         page.goto(EBAY_HOME, wait_until="domcontentloaded", timeout=20_000)
-        # eBay shows a greeting element when logged in
-        return page.locator("#gh-ug").is_visible(timeout=4_000)
+        # Try multiple known header selectors across eBay layout versions
+        for sel in ("#gh-ug", "[data-testid='gh-ug']", ".gh-username", "#gh-eb-My"):
+            try:
+                if page.locator(sel).is_visible(timeout=3_000):
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 
 
-def _login(page: Page, username: str, password: str) -> None:
-    """Perform eBay sign-in flow."""
-    page.goto(f"{EBAY_HOME}/signin/", wait_until="domcontentloaded", timeout=30_000)
-    _random_delay()
+def _fill_input(page: Page, selectors: list[str], value: str, timeout_each: int = 4_000) -> bool:
+    """Try each selector in order; fill the first visible one. Returns True on success."""
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            el.wait_for(state="visible", timeout=timeout_each)
+            el.click()
+            el.fill(value)
+            return True
+        except Exception:
+            continue
+    return False
 
-    # Enter username / email
-    page.fill("#userid", username)
-    page.click("#signin-continue-btn")
+
+def _click_button(page: Page, selectors: list[str], timeout_each: int = 4_000) -> bool:
+    """Try each selector in order; click the first visible one. Returns True on success."""
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            el.wait_for(state="visible", timeout=timeout_each)
+            el.click()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _handle_challenge(page: Page) -> None:
+    """Pause and let the user resolve any 2FA / CAPTCHA / security challenge."""
+    print(
+        "\n[!] eBay is asking for verification (2FA / CAPTCHA).\n"
+        "    Please complete it in the browser window, then press ENTER here to continue."
+    )
+    input("    Press ENTER when done > ")
+    _random_delay(2.0, 3.0)
+
+
+def _login(page: Page, username: str, password: str) -> None:
+    """Perform eBay sign-in, handling both the legacy and current two-step login flow."""
+    # eBay sometimes redirects /signin/ to signin.ebay.co.uk — follow it
+    page.goto(f"{EBAY_HOME}/signin/", wait_until="domcontentloaded", timeout=30_000)
+    _random_delay(1.5, 2.5)
+
+    # --- Step 1: username / email ---
+    # eBay has used several IDs/attributes for this field over the years
+    username_selectors = [
+        "#userid",                          # legacy id
+        "input[name='userid']",             # name attr (stable)
+        "input[type='email']",              # newer layout
+        "input[type='text'][autocomplete*='email']",
+        "input[aria-label*='email' i]",
+        "input[aria-label*='username' i]",
+        "input[placeholder*='email' i]",
+        "input[placeholder*='username' i]",
+        "form input[type='text']",          # last-resort generic
+    ]
+    if not _fill_input(page, username_selectors, username, timeout_each=5_000):
+        raise RuntimeError(
+            "Could not find the username/email input on eBay's login page. "
+            "Run with --headed to debug."
+        )
+
+    _random_delay(0.5, 1.0)
+
+    # --- Continue button (shown before password on two-step flow) ---
+    continue_selectors = [
+        "#signin-continue-btn",
+        "button[id*='continue']",
+        "input[id*='continue']",
+        "button[type='submit']:has-text('Continue')",
+        "button[type='submit']:has-text('Sign in')",
+        "button[type='submit']",
+        "input[type='submit']",
+    ]
+    _click_button(page, continue_selectors, timeout_each=4_000)
     _random_delay(1.5, 3.0)
 
-    # Enter password
-    page.wait_for_selector("#pass", timeout=15_000)
-    page.fill("#pass", password)
-    _random_delay(0.5, 1.5)
-    page.click("#sgnBt")
+    # Check for immediate challenge after entering email
+    if any(k in page.url for k in ("challenge", "verify", "security", "captcha")):
+        _handle_challenge(page)
 
-    # Wait for redirect back to home / dashboard
-    try:
-        page.wait_for_url(lambda url: "signin" not in url, timeout=30_000)
-    except PWTimeout:
-        pass  # May already be on the right page
-
-    _random_delay(2.0, 4.0)
-
-    # Check for 2FA / security challenge — pause and let the user handle it
-    if "challenge" in page.url or "verify" in page.url or "security" in page.url.lower():
-        print(
-            "\n[!] eBay is asking for verification (2FA / CAPTCHA).\n"
-            "    Please complete it in the browser window, then press ENTER here to continue."
+    # --- Step 2: password ---
+    password_selectors = [
+        "#pass",
+        "input[name='pass']",
+        "input[type='password']",
+        "input[aria-label*='password' i]",
+        "input[placeholder*='password' i]",
+    ]
+    if not _fill_input(page, password_selectors, password, timeout_each=15_000):
+        raise RuntimeError(
+            "Could not find the password input on eBay's login page. "
+            "Run with --headed to debug."
         )
-        input("    Press ENTER when done > ")
-        _random_delay(2.0, 3.0)
+
+    _random_delay(0.5, 1.2)
+
+    # --- Sign-in submit button ---
+    signin_selectors = [
+        "#sgnBt",
+        "button[id*='sgnBt']",
+        "input[id*='sgnBt']",
+        "button[type='submit']:has-text('Sign in')",
+        "button[type='submit']",
+        "input[type='submit']",
+    ]
+    _click_button(page, signin_selectors, timeout_each=4_000)
+
+    # Wait for navigation away from the sign-in page
+    try:
+        page.wait_for_url(lambda url: "signin" not in url.lower(), timeout=30_000)
+    except PWTimeout:
+        pass
+
+    _random_delay(2.0, 3.5)
+
+    # Handle post-login challenge (2FA, SMS code, CAPTCHA, etc.)
+    if any(k in page.url.lower() for k in ("challenge", "verify", "security", "captcha", "2fa", "otp")):
+        _handle_challenge(page)
 
 
 # ---------------------------------------------------------------------------
