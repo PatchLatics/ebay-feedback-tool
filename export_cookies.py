@@ -19,10 +19,9 @@ Usage:
 import json
 import platform
 import sys
-import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import sync_playwright
 
 COOKIES_FILE = Path(__file__).parent / "cookies.json"
 EBAY_HOME = "https://www.ebay.co.uk"
@@ -108,20 +107,6 @@ def _profile_is_locked(profile_dir: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Login detection
-# ---------------------------------------------------------------------------
-
-def _is_logged_in(page: Page) -> bool:
-    for sel in ("#gh-ug", "[data-testid='gh-ug']", ".gh-username", "#gh-eb-My"):
-        try:
-            if page.locator(sel).is_visible(timeout=2_000):
-                return True
-        except Exception:
-            continue
-    return False
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -181,25 +166,8 @@ def main() -> None:
 
         input("Press ENTER once you can see your eBay account (logged-in homepage) > ")
 
-        # Reload to confirm the session is genuinely active
-        page.goto(EBAY_HOME, wait_until="domcontentloaded", timeout=20_000)
-        time.sleep(2)
-
-        if not _is_logged_in(page):
-            print(
-                "\n[!] Could not detect a logged-in eBay session.\n"
-                "    Make sure you are signed in to eBay in the browser window,\n"
-                "    then run this script again."
-            )
-            context.close()
-            sys.exit(1)
-
-        # Capture cookies for all eBay domains
-        cookies = context.cookies([
-            "https://www.ebay.co.uk",
-            "https://signin.ebay.co.uk",
-            "https://ebay.co.uk",
-        ])
+        # Capture all cookies from the session — no validation, just save everything
+        cookies = context.cookies()
 
         context.close()
 
