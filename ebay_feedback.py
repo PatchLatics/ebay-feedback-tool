@@ -1,18 +1,8 @@
 """
-Core eBay feedback automation using Playwright.
+eBay Feedback Tool — core automation.
 
-Runs entirely inside the user's real Brave browser (persistent profile),
-so eBay sees an already-authenticated, trusted session with no bot signals.
-
-Flow:
-  1. Launch Brave with the real User Data directory via launch_persistent_context.
-  2. Verify the session looks active; warn if not but continue anyway.
-  3. Navigate to the "Leave Feedback" page and collect all pending items.
-  4. For each item, submit a positive feedback message.
-  5. Report results.
-
-IMPORTANT: Brave must be fully closed before running this script.
-           Chromium locks the profile directory while it is open.
+Launches Brave with the real user profile, finds all purchases (buyer-side)
+awaiting feedback, and submits a fixed positive message for each one.
 """
 
 import time
@@ -23,10 +13,8 @@ from typing import Optional
 
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
-from feedback_messages import get_feedback
-
 # ---------------------------------------------------------------------------
-# Brave paths — adjust if your installation differs
+# Configuration
 # ---------------------------------------------------------------------------
 
 BRAVE_EXE = Path(
@@ -39,6 +27,8 @@ BRAVE_PROFILE = Path(
 EBAY_HOME = "https://www.ebay.co.uk"
 FEEDBACK_URL = "https://www.ebay.co.uk/fdbk/leave_feedback"
 
+FEEDBACK_MESSAGE = "Excellent transaction. Hope to do business again. PSLuxuries"
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -49,7 +39,6 @@ class FeedbackResult:
     item_id: str
     title: str
     success: bool
-    message: str = ""
     error: str = ""
 
 
@@ -71,7 +60,6 @@ def _random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
 
 
 def _check_brave_paths() -> None:
-    """Abort early with a helpful message if the Brave paths don't exist."""
     if not BRAVE_EXE.exists():
         raise FileNotFoundError(
             f"Brave executable not found at:\n  {BRAVE_EXE}\n"
@@ -85,7 +73,6 @@ def _check_brave_paths() -> None:
 
 
 def _profile_is_locked() -> bool:
-    """Return True if another Brave/Chromium process holds the profile lock."""
     for name in ("SingletonLock", "SingletonSocket", "lockfile"):
         candidate = BRAVE_PROFILE / name
         if candidate.exists() or candidate.is_symlink():
@@ -93,54 +80,75 @@ def _profile_is_locked() -> bool:
     return False
 
 
-
 def _extract_param(url: str, param: str) -> Optional[str]:
     from urllib.parse import urlparse, parse_qs
-    qs = parse_qs(urlparse(url).query)
-    vals = qs.get(param, [])
+    vals = parse_qs(urlparse(url).query).get(param, [])
     return vals[0] if vals else None
 
 
 # ---------------------------------------------------------------------------
-# Feedback scraping & submission
+# Feedback page scraping
 # ---------------------------------------------------------------------------
 
-def _get_pending_items(page: Page) -> list[dict]:
+def _get_pending_buyer_items(page: Page) -> list[dict]:
     """
-    Navigate to the leave-feedback page and return a list of pending items.
-    Each item dict has: item_id, title, feedback_url.
+    Navigate to the leave-feedback page and return only items where the
+    user is the BUYER (purchases), skipping any seller-side entries.
+    Each item dict contains: item_id, title, feedback_url.
     """
+    # eBay's feedback page has a "Purchases" tab — click it to filter to buyer items
     page.goto(FEEDBACK_URL, wait_until="domcontentloaded", timeout=30_000)
-    _random_delay(1.5, 3.0)
+    _random_delay(1.5, 2.5)
+
+    # Click the "As a Buyer" / "Purchases" tab if present
+    for tab_sel in (
+        "a:has-text('As a Buyer')",
+        "a:has-text('Purchases')",
+        "li:has-text('As a Buyer') a",
+        "li:has-text('Purchases') a",
+        "[data-tab*='buyer' i]",
+        "[data-tab*='purchase' i]",
+    ):
+        try:
+            tab = page.locator(tab_sel).first
+            if tab.is_visible(timeout=2_000):
+                tab.click()
+                _random_delay(1.0, 2.0)
+                break
+        except Exception:
+            continue
 
     items = []
 
+    # Primary: rows with data-itemid attribute
     rows = page.locator("tr.fb-row, .feedback-row, [data-itemid]").all()
-
-    if not rows:
-        links = page.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").all()
-        for link in links:
-            href = link.get_attribute("href") or ""
-            if "item_id=" in href or "itemid=" in href.lower():
-                item_id = _extract_param(href, "item_id") or _extract_param(href, "itemId") or ""
-                title = link.inner_text().strip() or "Unknown item"
+    if rows:
+        for row in rows:
+            item_id = row.get_attribute("data-itemid") or ""
+            title_el = row.locator(".item-title, .item-name, td:nth-child(2)").first
+            title = title_el.inner_text().strip() if title_el else "Unknown item"
+            link_el = row.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").first
+            href = link_el.get_attribute("href") if link_el else ""
+            if href:
                 items.append({"item_id": item_id, "title": title, "feedback_url": href})
         return items
 
-    for row in rows:
-        item_id = row.get_attribute("data-itemid") or ""
-        title_el = row.locator(".item-title, .item-name, td:nth-child(2)").first
-        title = title_el.inner_text().strip() if title_el else "Unknown item"
-        link_el = row.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").first
-        href = link_el.get_attribute("href") if link_el else ""
-        if href:
+    # Fallback: any leave-feedback links on the page
+    for link in page.locator("a[href*='leave_feedback'], a[href*='leavefeedback']").all():
+        href = link.get_attribute("href") or ""
+        if "item_id=" in href or "itemid=" in href.lower():
+            item_id = _extract_param(href, "item_id") or _extract_param(href, "itemId") or ""
+            title = link.inner_text().strip() or "Unknown item"
             items.append({"item_id": item_id, "title": title, "feedback_url": href})
 
     return items
 
 
+# ---------------------------------------------------------------------------
+# Feedback submission
+# ---------------------------------------------------------------------------
+
 def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
-    """Open the feedback form for a single item and submit positive feedback."""
     result = FeedbackResult(item_id=item["item_id"], title=item["title"], success=False)
 
     try:
@@ -150,8 +158,8 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         _random_delay(1.5, 2.5)
 
-        # --- Select "Positive" radio ---
-        clicked_positive = False
+        # --- Select Positive / 5-star ---
+        clicked = False
         for sel in (
             "input[value='Positive']",
             "input[id*='positive']",
@@ -162,26 +170,25 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
                 radio = page.locator(sel).first
                 if radio.is_visible(timeout=3_000):
                     radio.click()
-                    clicked_positive = True
+                    clicked = True
                     break
             except Exception:
                 continue
 
-        if not clicked_positive:
+        if not clicked:
             try:
                 page.get_by_text("Positive", exact=True).first.click()
-                clicked_positive = True
+                clicked = True
             except Exception:
                 pass
 
-        if not clicked_positive:
+        if not clicked:
             result.error = "Could not find Positive radio button"
             return result
 
-        _random_delay(0.5, 1.5)
+        _random_delay(0.5, 1.2)
 
-        # --- Type feedback comment ---
-        message = get_feedback(item["title"])
+        # --- Type the fixed message ---
         typed = False
         for sel in (
             "textarea[name*='comment']",
@@ -193,7 +200,7 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
                 ta = page.locator(sel).first
                 if ta.is_visible(timeout=3_000):
                     ta.click()
-                    ta.fill(message)
+                    ta.fill(FEEDBACK_MESSAGE)
                     typed = True
                     break
             except Exception:
@@ -203,7 +210,7 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
             result.error = "Could not find feedback comment textarea"
             return result
 
-        _random_delay(0.8, 1.8)
+        _random_delay(0.8, 1.5)
 
         # --- Submit ---
         submitted = False
@@ -237,7 +244,6 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
 
         _random_delay(1.5, 3.0)
         result.success = True
-        result.message = message
 
     except Exception as exc:
         result.error = str(exc)
@@ -250,13 +256,6 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
 # ---------------------------------------------------------------------------
 
 def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
-    """
-    Launch Brave with the real user profile and submit feedback for every
-    pending eBay item.
-
-    headless=False by default because running a persistent Brave profile
-    headlessly can trigger bot-detection on some eBay flows.
-    """
     _check_brave_paths()
 
     if _profile_is_locked():
@@ -282,11 +281,8 @@ def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
 
         page = context.pages[0] if context.pages else context.new_page()
 
-        print("Running inside your Brave profile.")
-
-        # --- Collect pending items ---
-        print("Fetching pending feedback items...")
-        items = _get_pending_items(page)
+        print("Fetching pending feedback items (purchases only)...")
+        items = _get_pending_buyer_items(page)
         summary.total = len(items)
 
         if not items:
@@ -296,14 +292,12 @@ def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
 
         print(f"Found {len(items)} item(s) awaiting feedback.\n")
 
-        # --- Process each item ---
         for i, item in enumerate(items, 1):
             label = item["title"] or item["item_id"]
             print(f"  [{i}/{len(items)}] {label}")
 
             if dry_run:
-                msg = get_feedback(item["title"])
-                print(f"         [dry-run] Would post: \"{msg}\"")
+                print(f'         [dry-run] Would post: "{FEEDBACK_MESSAGE}"')
                 summary.skipped += 1
                 continue
 
@@ -312,13 +306,13 @@ def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
 
             if result.success:
                 summary.succeeded += 1
-                print(f"         ✓ Posted: \"{result.message}\"")
+                print(f"         ✓ Done")
             else:
                 summary.failed += 1
                 print(f"         ✗ Failed: {result.error}")
 
             if i < len(items):
-                _random_delay(2.0, 5.0)
+                _random_delay(2.0, 4.0)
 
         context.close()
 
