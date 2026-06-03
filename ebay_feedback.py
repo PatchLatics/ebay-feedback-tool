@@ -90,7 +90,19 @@ def _extract_param(url: str, param: str) -> Optional[str]:
 # Feedback page scraping
 # ---------------------------------------------------------------------------
 
-def _get_pending_buyer_items(page: Page) -> list[dict]:
+def _save_debug_snapshot(page: Page) -> None:
+    """Save a screenshot and the full page HTML for selector debugging."""
+    debug_dir = Path(__file__).parent / "debug"
+    debug_dir.mkdir(exist_ok=True)
+    screenshot_path = debug_dir / "feedback_page.png"
+    html_path = debug_dir / "feedback_page.html"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    html_path.write_text(page.content(), encoding="utf-8")
+    print(f"\n[debug] Screenshot → {screenshot_path}")
+    print(f"[debug] HTML      → {html_path}\n")
+
+
+def _get_pending_buyer_items(page: Page, debug: bool = False) -> list[dict]:
     """
     Navigate to the leave-feedback page and return only items where the
     user is the BUYER (purchases), skipping any seller-side entries.
@@ -117,6 +129,9 @@ def _get_pending_buyer_items(page: Page) -> list[dict]:
                 break
         except Exception:
             continue
+
+    if debug:
+        _save_debug_snapshot(page)
 
     items = []
 
@@ -255,7 +270,7 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
 # Public API
 # ---------------------------------------------------------------------------
 
-def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
+def run(headless: bool = False, dry_run: bool = False, debug: bool = False) -> RunSummary:
     _check_brave_paths()
 
     if _profile_is_locked():
@@ -282,7 +297,7 @@ def run(headless: bool = False, dry_run: bool = False) -> RunSummary:
         page = context.pages[0] if context.pages else context.new_page()
 
         print("Fetching pending feedback items (purchases only)...")
-        items = _get_pending_buyer_items(page)
+        items = _get_pending_buyer_items(page, debug=debug)
         summary.total = len(items)
 
         if not items:

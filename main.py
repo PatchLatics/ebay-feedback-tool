@@ -58,7 +58,7 @@ def _print_summary(summary: RunSummary, dry_run: bool) -> None:
     for i, r in enumerate(summary.results, 1):
         if r.success:
             status = "[green]✓ OK[/green]"
-            detail = f'[dim]"{r.message}"[/dim]'
+            detail = ""
         else:
             status = "[red]✗ ERR[/red]"
             detail = f"[red]{r.error}[/red]"
@@ -79,6 +79,10 @@ def main() -> None:
         "--headed", action="store_true",
         help="Show the browser window while running.",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Save a screenshot and full page HTML to debug/ after loading the feedback page.",
+    )
     args = parser.parse_args()
 
     headless_env = os.getenv("HEADLESS", "true").lower() not in ("false", "0", "no")
@@ -88,11 +92,13 @@ def main() -> None:
 
     if args.dry_run:
         console.print("[yellow]Dry-run mode — no feedback will actually be submitted.[/yellow]")
+    if args.debug:
+        console.print("[yellow]Debug mode — screenshot and HTML will be saved to debug/[/yellow]")
 
     console.print()
 
     try:
-        summary = run(headless=headless, dry_run=args.dry_run)
+        summary = run(headless=headless, dry_run=args.dry_run, debug=args.debug)
     except (FileNotFoundError, RuntimeError) as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
