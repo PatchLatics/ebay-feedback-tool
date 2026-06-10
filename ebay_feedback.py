@@ -5,6 +5,7 @@ Launches Brave with the real user profile, finds all purchases (buyer-side)
 awaiting feedback, and submits a fixed positive message for each one.
 """
 
+import re
 import time
 import random
 from pathlib import Path
@@ -102,6 +103,12 @@ def _save_debug_snapshot(page: Page) -> None:
     print(f"[debug] HTML      → {html_path}\n")
 
 
+_FEEDBACK_URL_RE = re.compile(
+    r'https://www\.ebay\.co\.uk/fdbk/leave_single_feedback'
+    r'\?item_id=\d+&overall_experience_rating=POSITIVE&transaction_id=\d+'
+)
+
+
 def _load_all_items(page: Page) -> None:
     """Keep clicking 'Load more' until it disappears or stops adding items."""
     while True:
@@ -109,16 +116,15 @@ def _load_all_items(page: Page) -> None:
             btn = page.get_by_role("button", name="Load more").first
             if not btn.is_visible(timeout=3_000):
                 break
-            prev_count = page.locator("input[value='Positive'], label:has-text('Positive')").count()
+            prev_src_len = len(page.content())
             btn.click()
-            # Wait until new items appear or a timeout tells us there are no more
             try:
                 page.wait_for_function(
-                    f"document.querySelectorAll(\"input[value='Positive'], label\").length > {prev_count}",
+                    f"document.documentElement.outerHTML.length > {prev_src_len}",
                     timeout=8_000,
                 )
             except PWTimeout:
-                break  # No new items appeared — we're at the end
+                break
             _random_delay(1.0, 2.0)
         except Exception:
             break
@@ -127,8 +133,8 @@ def _load_all_items(page: Page) -> None:
 def _get_pending_buyer_items(page: Page, debug: bool = False) -> list[dict]:
     """
     Navigate to the leave-feedback page, expand all items via 'Load more',
-    then find every item that has a 'Positive' button (i.e. awaiting feedback).
-    Returns a list of dicts with: item_id, title, feedback_url.
+    then extract all leave_single_feedback URLs from the raw page source via
+    regex.  Returns a list of dicts with: item_id, feedback_url.
     """
     page.goto(FEEDBACK_URL, wait_until="domcontentloaded", timeout=30_000)
     _random_delay(1.5, 2.5)
@@ -138,83 +144,17 @@ def _get_pending_buyer_items(page: Page, debug: bool = False) -> list[dict]:
     if debug:
         _save_debug_snapshot(page)
 
+    source = page.content()
+    raw_urls = _FEEDBACK_URL_RE.findall(source)
+
+    # De-duplicate while preserving order
+    seen: set[str] = set()
     items = []
-
-    # eBay's current feedback page renders each transaction as a card/row that
-    # contains a "Positive" button (or radio label).  Walk up from every
-    # "Positive" button to the nearest ancestor that also contains the item
-    # title and the leave-feedback link.
-    positive_buttons = page.locator(
-        "input[value='Positive'], "
-        "label:has-text('Positive'), "
-        "button:has-text('Positive'), "
-        "a:has-text('Positive')"
-    ).all()
-
-    for btn in positive_buttons:
-        # Walk up the DOM to find a container that holds both the title and a link
-        container = None
-        for ancestor_sel in ("section", "article", "li", "tr", "div.card", "div"):
-            try:
-                candidate = btn.locator(f"xpath=ancestor::{ancestor_sel.split('.')[0]}[1]")
-                # Verify it contains something that looks like an item link or title
-                if candidate.locator("a").count() > 0:
-                    container = candidate
-                    break
-            except Exception:
-                continue
-
-        if container is None:
-            continue
-
-        # Title: prefer a heading or named element; fall back to first non-empty text
-        title = ""
-        for title_sel in ("h2", "h3", "h4", ".item-title", ".title", "span.BOLD", "a[href*='/itm/']"):
-            try:
-                el = container.locator(title_sel).first
-                if el.count() and el.is_visible(timeout=1_000):
-                    title = el.inner_text().strip()
-                    if title:
-                        break
-            except Exception:
-                continue
-
-        # Leave-feedback link: look for a form action or a direct href
-        href = ""
-        for link_sel in (
-            "a[href*='leave_feedback']",
-            "a[href*='leavefeedback']",
-            "a[href*='/fdbk/']",
-        ):
-            try:
-                el = container.locator(link_sel).first
-                if el.count():
-                    href = el.get_attribute("href") or ""
-                    if href:
-                        break
-            except Exception:
-                continue
-
-        # If there's no direct link, the Positive button itself may be inside a
-        # form whose action is the feedback URL
-        if not href:
-            try:
-                form = btn.locator("xpath=ancestor::form[1]")
-                href = form.get_attribute("action") or ""
-            except Exception:
-                pass
-
-        if not href:
-            continue
-
-        item_id = (
-            _extract_param(href, "item_id")
-            or _extract_param(href, "itemId")
-            or _extract_param(href, "iid")
-            or ""
-        )
-
-        items.append({"item_id": item_id, "title": title or "Unknown item", "feedback_url": href})
+    for url in raw_urls:
+        if url not in seen:
+            seen.add(url)
+            item_id = _extract_param(url, "item_id") or ""
+            items.append({"item_id": item_id, "title": "", "feedback_url": url})
 
     return items
 
@@ -227,43 +167,12 @@ def _submit_feedback_for_item(page: Page, item: dict) -> FeedbackResult:
     result = FeedbackResult(item_id=item["item_id"], title=item["title"], success=False)
 
     try:
+        # Navigate directly to the pre-built URL (POSITIVE already in query string)
         url = item["feedback_url"]
-        if not url.startswith("http"):
-            url = f"{EBAY_HOME}{url}"
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         _random_delay(1.5, 2.5)
 
-        # --- Select Positive / 5-star ---
-        clicked = False
-        for sel in (
-            "input[value='Positive']",
-            "input[id*='positive']",
-            "label[for*='positive'] input",
-            "#Positive",
-        ):
-            try:
-                radio = page.locator(sel).first
-                if radio.is_visible(timeout=3_000):
-                    radio.click()
-                    clicked = True
-                    break
-            except Exception:
-                continue
-
-        if not clicked:
-            try:
-                page.get_by_text("Positive", exact=True).first.click()
-                clicked = True
-            except Exception:
-                pass
-
-        if not clicked:
-            result.error = "Could not find Positive radio button"
-            return result
-
-        _random_delay(0.5, 1.2)
-
-        # --- Type the fixed message ---
+        # --- Fill in the comment ---
         typed = False
         for sel in (
             "textarea[name*='comment']",
