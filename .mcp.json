@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "markitdown": {
+      "command": "uvx",
+      "args": ["--from", "trsdn-markitdown-mcp[all]", "markitdown-mcp"]
+    }
+  }
+}
